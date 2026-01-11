@@ -1,0 +1,550 @@
+/**
+ * ========== 变量定义（完整版：原变量 + 所有新增变量，无重复定义） ==========
+ */
+let currentEmoji = 0;
+let pressDuration3 = 0;
+let light2 = 0;
+let temp = 0;
+let pressDuration2 = 0;
+let morseMute = false;
+let pressDuration = 0;
+let teamStepCount = 0;
+let recvStep = 0;
+let recvTeamID = "";
+let parts = [];
+let isInTeam = false;
+let accZ = 0;
+let stepCount = 0;
+let bPressTime = 0;
+let bPressing = false;
+let abPressTime = 0;
+let abPressing = false;
+let aPressTime = 0;
+let aPressing = false;
+let aPressCount = 0;
+let aLastPressTime = 0;
+let now = 0;
+let gameRunning = false;
+let ballX = 0;
+let ballY = 0;
+let ballDX = 0;
+let ballDY = 0;
+let paddleY = 0;
+let teamID = "";
+let teamMemberCount = 0;
+// 新增所有变量（防抖+电量+组队展示+摩斯历史+游戏计分+里程碑）
+let stepLock = false;
+let teamShowTimer = 0;
+let morseHistory = "";
+const MORSE_MAX_LEN = 10;
+let gameScore = 0;
+const WIN_SCORE = 50;
+
+// 初始化参数配置
+teamMemberCount = 1;
+teamID = "turtle";
+paddleY = 2;
+ballDY = 1;
+ballDX = 1;
+ballY = 1;
+ballX = 2;
+
+/**
+ * ========== 所有功能函数（完整版：原函数+新增所有函数，顺序整理） ==========
+ */
+// 接收摩斯密码（移除小车避障警告）
+radio.onReceivedNumber(function (receivedNumber) {
+    if (gameRunning) {
+        return;
+    }
+    if (receivedNumber == 1) {
+        for (let index = 0; index < 1; index++) {
+            basic.showLeds(`
+                . . . . .
+                . . # . .
+                . # # # .
+                . . # . .
+                . . . . .
+                `);
+            basic.pause(100);
+            basic.clearScreen();
+            basic.pause(100);
+        }
+    } else if (receivedNumber == 2) {
+        for (let index = 0; index < 3; index++) {
+            basic.showLeds(`
+                . . # . .
+                . . # . .
+                . . # . .
+                . . # . .
+                . . # . .
+                `);
+            basic.pause(100);
+            basic.clearScreen();
+            basic.pause(100);
+        }
+    } else if (receivedNumber >= 10 && receivedNumber <= 13) {
+        showEmoji(receivedNumber - 10);
+        basic.pause(2000);
+        basic.clearScreen();
+    }
+});
+
+// A键按下（打砖块+摩斯+移除小车左转，修复无冲突）
+input.onButtonPressed(Button.A, function () {
+    if (gameRunning) {
+        if (paddleY > 0) {
+            paddleY += 0 - 1;
+        }
+        return;
+    }
+    now = input.runningTime();
+    if (now - aLastPressTime < 1000) {
+        aPressCount += 1;
+    } else {
+        aPressCount = 1;
+    }
+    aLastPressTime = now;
+    if (aPressCount == 3) {
+        gameRunning = !(gameRunning);
+        aPressCount = 0;
+        if (gameRunning) {
+            basic.showLeds(`
+                . . # . .
+                . # # . .
+                . . # . .
+                . . # . .
+                . # # # .
+                `);
+            ballX = 2;
+            ballY = 1;
+            ballDX = 1;
+            ballDY = 1;
+            paddleY = 2;
+            gameScore = 0; // 新增：启动游戏重置分数
+        } else {
+            basic.showLeds(`
+                # # # # #
+                # . . . #
+                # . . . #
+                # . . . #
+                # # # # #
+                `);
+        }
+        basic.pause(500);
+        basic.clearScreen();
+        return;
+    }
+    aPressing = true;
+    aPressTime = input.runningTime();
+});
+
+// AB键按下（组队+表情包+移除小车前进/后退）
+input.onButtonPressed(Button.AB, function () {
+    if (gameRunning) {
+        return;
+    }
+    abPressing = true;
+    abPressTime = input.runningTime();
+});
+
+// 接收组队/步数数据
+radio.onReceivedString(function (receivedStr) {
+    if (gameRunning) {
+        return;
+    }
+    handleTeamData(receivedStr);
+});
+
+// 重置按键状态
+function resetKeyState() {
+    aPressing = false;
+    bPressing = false;
+    abPressing = false;
+    aPressTime = 0;
+    bPressTime = 0;
+    abPressTime = 0;
+}
+
+// B键按下（打砖块+摩斯+短按显示步数，核心修复：短按只显步数，长按才触发摩斯）
+input.onButtonPressed(Button.B, function () {
+    if (gameRunning) {
+        if (paddleY < 4) {
+            paddleY += 1;
+        }
+        return;
+    }
+    // 短按B键：仅显示当前步数，无其他逻辑
+    basic.showString("STEP:");
+    basic.showNumber(stepCount);
+    basic.pause(2000);
+    basic.clearScreen();
+    // 关键修复：只有长按才标记B键按下，触发摩斯逻辑
+    let pressTemp = input.runningTime();
+    basic.pause(20);
+    if (input.buttonIsPressed(Button.B)) {
+        bPressing = true;
+        bPressTime = pressTemp;
+    }
+});
+
+// 计步器核心函数（修复：防抖去重+阈值1300+计步里程碑奖励）
+function countStep() {
+    accZ = input.acceleration(Dimension.Z);
+    if (Math.abs(accZ) > 1300 && !(gameRunning) && !(stepLock)) {
+        stepCount += 1;
+        basic.showLeds(`
+            . . # . .
+            . # # # .
+            # # # # #
+            . # # # .
+            . . # . .
+            `);
+        basic.pause(50);
+        basic.clearScreen();
+        if (isInTeam) {
+            radio.sendString("" + teamID + ":" + stepCount);
+        }
+        // 新增：计步里程碑奖励（10/50/100步触发提示+全队广播）
+        if (stepCount % 10 == 0 || stepCount % 50 == 0 || stepCount % 100 == 0) {
+            basic.showNumber(stepCount);
+            music.playMelody("C5 B A G F E D C ", 100);
+            basic.pause(500);
+            basic.clearScreen();
+            if (isInTeam) {
+                radio.sendString(teamID + ":MVP:" + stepCount);
+            }
+        }
+        // 防抖核心逻辑
+        stepLock = true;
+        basic.pause(500);
+        stepLock = false;
+    }
+}
+
+// 表情包显示函数
+function showEmoji(index: number) {
+    switch (index) {
+        case 0:
+            basic.showLeds(`
+                . . . . .
+                . # . # .
+                . . . . .
+                # . . . #
+                . # # # .
+            `);
+            break;
+        case 1:
+            basic.showLeds(`
+                . . . . .
+                . # . # .
+                . . . . .
+                . # # # .
+                # . . . #
+            `);
+            break;
+        case 2:
+            basic.showLeds(`
+                # . # . #
+                . # # # .
+                # . # . #
+                . # # # .
+                # . # . #
+            `);
+            break;
+        case 3:
+            basic.showLeds(`
+                . . # . .
+                . # # # .
+                # # # # #
+                . # # # .
+                . . # . .
+            `);
+            break;
+    }
+}
+
+// 组队数据处理函数（原版+新增：队友里程碑祝贺）
+function handleTeamData(receivedStr: string) {
+    if (receivedStr.includes(":")) {
+        parts = receivedStr.split(":");
+        recvTeamID = parts[0];
+        recvStep = parseInt(parts[1]);
+        if (recvTeamID == teamID && recvStep > 0) {
+            teamStepCount = teamStepCount - stepCount + recvStep;
+            teamMemberCount = Math.max(teamMemberCount, 2);
+            isInTeam = true;
+        }
+    } else if (receivedStr.includes("JOIN:")) {
+        let reqTeamID = receivedStr.replace("JOIN:", "");
+        if (reqTeamID == teamID) {
+            radio.sendString("" + teamID + ":" + stepCount);
+            basic.showIcon(IconNames.Heart);
+            basic.pause(500);
+            basic.clearScreen();
+            isInTeam = true;
+            teamMemberCount += 1;
+        }
+    } else if (receivedStr.includes("MVP:")) {
+        // 新增：接收队友里程碑，全队展示祝贺
+        basic.showString("MVP!");
+        basic.showNumber(parseInt(receivedStr.split(":")[2]));
+        basic.pause(1000);
+        basic.clearScreen();
+    }
+}
+
+// 新增：低电量检测提醒（刚需功能）
+function checkBattery() {
+    let voltage = pins.analogReadPin(AnalogPin.P0) * 0.0033;
+    if (voltage < 2.0 && !(gameRunning)) {
+        basic.showLeds(`
+            # . . . #
+            . # . # .
+            . . # . .
+            . # . # .
+            # . . . #
+        `);
+        basic.showString("LOW");
+        music.playTone(262, 500);
+        basic.pause(1000);
+        basic.clearScreen();
+    }
+}
+
+// 新增：组队信息自动滚动展示（每10秒一次）
+function showTeamInfoAuto() {
+    teamShowTimer += 1;
+    if (isInTeam && !(gameRunning) && teamShowTimer >= 200) {
+        basic.showString(teamID);
+        basic.showString("T:" + teamMemberCount + "人");
+        basic.showString("ALL:");
+        basic.showNumber(teamStepCount);
+        basic.showString("步");
+        basic.pause(2000);
+        basic.clearScreen();
+        teamShowTimer = 0;
+    }
+}
+
+// 新增：添加摩斯密码历史记录
+function addMorseRecord(type: string) {
+    if (morseHistory.length >= MORSE_MAX_LEN) {
+        morseHistory = "";
+    }
+    morseHistory += type;
+}
+
+// 新增：显示摩斯密码历史记录
+function showMorseHistory() {
+    if (morseHistory != "" && !(gameRunning)) {
+        basic.showString("M:");
+        basic.showString(morseHistory);
+        basic.pause(3000);
+        basic.clearScreen();
+    } else {
+        basic.showString("NO REC");
+        basic.pause(1000);
+        basic.clearScreen();
+    }
+}
+
+/**
+ * ========== 初始化配置（只执行一次，清理重复） ==========
+ */
+radio.setGroup(1);
+led.setBrightness(150);
+basic.showString("Hello");
+basic.showLeds(`
+    . . . . .
+    . # . # .
+    . . . . .
+    # . . . #
+    . # # # .
+    `);
+basic.pause(1000);
+basic.clearScreen();
+basic.showString(teamID);
+radio.sendString("JOIN:" + teamID);
+basic.clearScreen();
+
+/**
+ * ========== 核心循环逻辑（完整版：包含所有功能，无删减） ==========
+ */
+basic.forever(function () {
+    // 新增：实时电量检测
+    checkBattery();
+    // 计步核心逻辑
+    countStep();
+    // 新增：组队信息自动展示
+    showTeamInfoAuto();
+
+    // A键逻辑：短按发点+记录，长按静音+显步数
+    if (aPressing) {
+        pressDuration = input.runningTime() - aPressTime;
+        if (pressDuration > 100 && pressDuration < 800 && !(input.buttonIsPressed(Button.A))) {
+            basic.showLeds(`
+                . . . . .
+                . . . . .
+                . # # # .
+                . . . . .
+                . . . . .
+                `);
+            if (!(morseMute)) {
+                music.playTone(880, 100);
+            }
+            addMorseRecord("."); // 新增：记录摩斯点
+            basic.pause(200);
+            basic.clearScreen();
+            aPressing = false;
+        } else if (pressDuration > 1000 && !(input.buttonIsPressed(Button.A))) {
+            morseMute = !(morseMute);
+            if (morseMute) {
+                basic.showLeds(`
+                    . # # # .
+                    # . . . #
+                    # . # . #
+                    # . . . #
+                    . # # # .
+                    `);
+            } else {
+                basic.showLeds(`
+                    . . # . .
+                    . # # # .
+                    # # # # #
+                    . # # # .
+                    . . # . .
+                    `);
+            }
+            basic.pause(1000);
+            basic.showString("STEP:");
+            basic.showNumber(stepCount);
+            basic.pause(1500);
+            basic.clearScreen();
+            aPressing = false;
+        }
+    }
+
+    // B键逻辑：长按发划+记录，长按测温亮度+显全队步数
+    if (bPressing) {
+        pressDuration2 = input.runningTime() - bPressTime;
+        if (pressDuration2 > 100 && pressDuration2 < 800 && !(input.buttonIsPressed(Button.B))) {
+            basic.showLeds(`
+                . . . . .
+                . # # # .
+                . # # # .
+                . # # # .
+                . . . . .
+                `);
+            if (!(morseMute)) {
+                music.playTone(440, 300);
+            }
+            addMorseRecord("-"); // 新增：记录摩斯划
+            basic.pause(400);
+            basic.clearScreen();
+            bPressing = false;
+        } else if (pressDuration2 > 1000 && !(input.buttonIsPressed(Button.B))) {
+            temp = input.temperature();
+            basic.showNumber(temp);
+            basic.showString("℃");
+            basic.pause(1500);
+            light2 = input.lightLevel();
+            basic.showNumber(light2);
+            basic.showString("L");
+            basic.pause(1500);
+            if (isInTeam) {
+                basic.showString("T:" + teamMemberCount + "人");
+                basic.showNumber(teamStepCount);
+                basic.showString("步");
+            } else {
+                basic.showString("未组队");
+            }
+            basic.pause(1500);
+            basic.clearScreen();
+            bPressing = false;
+        }
+    }
+
+    // AB键逻辑：短按切表情包，长按组队，超长按显摩斯历史
+    if (abPressing) {
+        pressDuration3 = input.runningTime() - abPressTime;
+        if (pressDuration3 > 100 && pressDuration3 < 800 && !(input.buttonIsPressed(Button.AB))) {
+            currentEmoji = (currentEmoji + 1) % 4;
+            showEmoji(currentEmoji);
+            radio.sendNumber(currentEmoji + 10);
+            basic.pause(2000);
+            basic.clearScreen();
+            abPressing = false;
+        } else if (pressDuration3 > 1000 && pressDuration3 < 2000 && !(input.buttonIsPressed(Button.AB))) {
+            radio.sendString("JOIN:" + teamID);
+            basic.showString("组队中");
+            music.playMelody("C D E F G A B C5 ", 120);
+            basic.pause(1000);
+            basic.showString(teamID);
+            basic.pause(1000);
+            basic.clearScreen();
+            abPressing = false;
+        } else if (pressDuration3 > 2000 && !(input.buttonIsPressed(Button.AB))) {
+            showMorseHistory(); // 新增：长按2秒显示摩斯历史
+            abPressing = false;
+        }
+    }
+
+    // 打砖块游戏主逻辑（完整版：得分+难度升级+胜利条件）
+    if (gameRunning) {
+        ballX += ballDX;
+        ballY += ballDY;
+        if (ballX < 0 || ballX > 4) {
+            ballDX = 0 - ballDX;
+        }
+        if (ballY < 0) {
+            ballDY = 0 - ballDY;
+        }
+        if (ballY == 3 && ballX == paddleY) {
+            ballDY = 0 - ballDY;
+            music.playTone(523, 50);
+            gameScore += 1;
+            // 每10分加速，难度升级
+            if (gameScore % 10 == 0) {
+                ballDX = ballDX * 1.2;
+                ballDY = ballDY * 1.2;
+                music.playTone(659, 100);
+            }
+        }
+        // 游戏胜利（50分通关）
+        if (gameScore >= WIN_SCORE) {
+            basic.showLeds(`
+                . # # # .
+                # . . . #
+                # . # . #
+                # . . . #
+                . # # # .
+            `);
+            music.playMelody("C5 D5 E5 F5 G5 A5 B5 C6 ", 120);
+            basic.pause(1500);
+            gameRunning = false;
+            gameScore = 0;
+            basic.clearScreen();
+        }
+        // 游戏结束
+        if (ballY > 4) {
+            basic.showIcon(IconNames.Sad);
+            music.playMelody("C4 C4 C4 - - - - - ", 120);
+            basic.pause(1000);
+            gameRunning = false;
+            gameScore = 0;
+            basic.clearScreen();
+        }
+        // 绘制画面+实时显示分数
+        basic.clearScreen();
+        led.plot(ballX, ballY);
+        led.plot(paddleY, 4);
+        basic.showNumber(gameScore);
+    }
+
+    // 新增：静音状态常驻小图标（右上角亮灯=静音）
+    if (morseMute) led.plot(4, 0);
+    else led.unplot(4, 0);
+
+    basic.pause(50);
+});
